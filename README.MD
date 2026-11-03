@@ -1,0 +1,1 @@
+https://chatgpt.com/share/6ae9491b-102c-83ec-b3f1-d3244424764f?ogimg=plain
