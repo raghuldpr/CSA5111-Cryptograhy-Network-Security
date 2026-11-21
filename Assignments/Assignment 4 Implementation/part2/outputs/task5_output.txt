@@ -1,0 +1,152 @@
+
+==============================================================================
+Simulated DNS zone published for the test domains (stored in C:\Users\raghu\AppData\Local\Temp\task5_zone.json)
+==============================================================================
+  example.org                          TXT v=spf1 ip4:192.0.2.10 ip4:192.0.2.0/28 -all
+  _dmarc.example.org                   TXT v=DMARC1; p=reject; adkim=r; aspf=r
+  s1._domainkey.example.org            TXT v=DKIM1; k=rsa; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA3rNCz+9u3Cb1vxig...
+  attacker.test                        TXT v=spf1 ip4:203.0.113.66 -all
+  s1._domainkey.attacker.test          TXT v=DKIM1; k=rsa; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAp5IpXJ4WwIrw0013...
+  _dmarc.attacker.test                 TXT v=DMARC1; p=none
+  lists.example.net                    TXT v=spf1 ip4:198.51.100.25 -all
+  s1._domainkey.lists.example.net      TXT v=DKIM1; k=rsa; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAq3kUoyGA1dYClrbw...
+
+==============================================================================
+Predictions (made before running) and actual evidence
+==============================================================================
+
+--- M1 legitimate (alice via own server, DKIM-signed)
+    envelope MAIL FROM=alice@example.org  client IP=192.0.2.10  visible From=alice@example.org
+    PREDICTION: SPF pass(aligned), DKIM pass(aligned) -> DMARC pass -> deliver
+    SPF:
+      DNS TXT example.org: v=spf1 ip4:192.0.2.10 ip4:192.0.2.0/28 -all
+        mechanism ip4:192.0.2.10/32: client 192.0.2.10 MATCH
+    DKIM:
+      DKIM-Signature: d=example.org s=s1 h=from:to:subject:date (signing domain = example.org)
+      DNS TXT s1._domainkey.example.org: public key found (2048 bit)
+      body hash matches (oTIf58XLHYrj..)
+      RSA signature over canonicalised headers valid
+    DMARC:
+      DNS TXT _dmarc.example.org: v=DMARC1; p=reject; adkim=r; aspf=r
+      SPF  : result=pass, authenticated domain=example.org, From=example.org -> aligned=True
+      DKIM : result=pass, signing domain=example.org, From=example.org -> aligned=True
+    ACTUAL: SPF=pass  DKIM=pass  DMARC=pass  -> deliver
+
+--- M2 spoofed: From ceo@example.org from unauthorised IP, unsigned
+    envelope MAIL FROM=ceo@example.org  client IP=203.0.113.66  visible From=ceo@example.org
+    PREDICTION: SPF fail, DKIM none -> DMARC fail -> REJECT
+    SPF:
+      DNS TXT example.org: v=spf1 ip4:192.0.2.10 ip4:192.0.2.0/28 -all
+        mechanism ip4:192.0.2.10/32: client 203.0.113.66 no match
+        mechanism ip4:192.0.2.0/28: client 203.0.113.66 no match
+        mechanism all: reached
+    DKIM:
+      no DKIM-Signature header
+    DMARC:
+      DNS TXT _dmarc.example.org: v=DMARC1; p=reject; adkim=r; aspf=r
+      SPF  : result=fail, authenticated domain=example.org, From=example.org -> aligned=False
+      DKIM : result=none, signing domain=None, From=example.org -> aligned=False
+    ACTUAL: SPF=fail  DKIM=none  DMARC=fail  -> REJECT
+
+--- M3 mailing list modified subject+footer after DKIM signing
+    envelope MAIL FROM=bounce@lists.example.net  client IP=198.51.100.25  visible From=alice@example.org
+    PREDICTION: SPF pass for lists.example.net but NOT aligned; DKIM fail (body/subject changed) -> DMARC fail -> REJECT (legit message lost!)
+    SPF:
+      DNS TXT lists.example.net: v=spf1 ip4:198.51.100.25 -all
+        mechanism ip4:198.51.100.25/32: client 198.51.100.25 MATCH
+    DKIM:
+      DKIM-Signature: d=example.org s=s1 h=from:to:subject:date (signing domain = example.org)
+      DNS TXT s1._domainkey.example.org: public key found (2048 bit)
+      body hash mismatch: computed zHTsRFUNGl7C.. != signed oTIf58XLHYrj.. (body changed after signing)
+    DMARC:
+      DNS TXT _dmarc.example.org: v=DMARC1; p=reject; adkim=r; aspf=r
+      SPF  : result=pass, authenticated domain=lists.example.net, From=example.org -> aligned=False
+      DKIM : result=fail, signing domain=example.org, From=example.org -> aligned=False
+    ACTUAL: SPF=pass  DKIM=fail  DMARC=fail  -> REJECT
+
+--- M4 passes SPF for attacker.test but visible From is example.org
+    envelope MAIL FROM=mallory@attacker.test  client IP=203.0.113.66  visible From=ceo@example.org
+    PREDICTION: SPF pass (unaligned), DKIM none -> DMARC fail -> REJECT
+    SPF:
+      DNS TXT attacker.test: v=spf1 ip4:203.0.113.66 -all
+        mechanism ip4:203.0.113.66/32: client 203.0.113.66 MATCH
+    DKIM:
+      no DKIM-Signature header
+    DMARC:
+      DNS TXT _dmarc.example.org: v=DMARC1; p=reject; adkim=r; aspf=r
+      SPF  : result=pass, authenticated domain=attacker.test, From=example.org -> aligned=False
+      DKIM : result=none, signing domain=None, From=example.org -> aligned=False
+    ACTUAL: SPF=pass  DKIM=none  DMARC=fail  -> REJECT
+
+--- M5 attacker signs DKIM as attacker.test, From example.org
+    envelope MAIL FROM=mallory@attacker.test  client IP=198.51.100.99  visible From=ceo@example.org
+    PREDICTION: SPF fail, DKIM pass (d=attacker.test, unaligned) -> DMARC fail -> REJECT
+    SPF:
+      DNS TXT attacker.test: v=spf1 ip4:203.0.113.66 -all
+        mechanism ip4:203.0.113.66/32: client 198.51.100.99 no match
+        mechanism all: reached
+    DKIM:
+      DKIM-Signature: d=attacker.test s=s1 h=from:to:subject:date (signing domain = attacker.test)
+      DNS TXT s1._domainkey.attacker.test: public key found (2048 bit)
+      body hash matches (oTIf58XLHYrj..)
+      RSA signature over canonicalised headers valid
+    DMARC:
+      DNS TXT _dmarc.example.org: v=DMARC1; p=reject; adkim=r; aspf=r
+      SPF  : result=fail, authenticated domain=attacker.test, From=example.org -> aligned=False
+      DKIM : result=pass, signing domain=attacker.test, From=example.org -> aligned=False
+    ACTUAL: SPF=fail  DKIM=pass  DMARC=fail  -> REJECT
+
+--- M6 unmodified forward through relay (IP/envelope changed)
+    envelope MAIL FROM=fwd@lists.example.net  client IP=198.51.100.25  visible From=alice@example.org
+    PREDICTION: SPF pass for relay domain but unaligned; DKIM still pass+aligned -> DMARC pass -> deliver
+    SPF:
+      DNS TXT lists.example.net: v=spf1 ip4:198.51.100.25 -all
+        mechanism ip4:198.51.100.25/32: client 198.51.100.25 MATCH
+    DKIM:
+      DKIM-Signature: d=example.org s=s1 h=from:to:subject:date (signing domain = example.org)
+      DNS TXT s1._domainkey.example.org: public key found (2048 bit)
+      body hash matches (oTIf58XLHYrj..)
+      RSA signature over canonicalised headers valid
+    DMARC:
+      DNS TXT _dmarc.example.org: v=DMARC1; p=reject; adkim=r; aspf=r
+      SPF  : result=pass, authenticated domain=lists.example.net, From=example.org -> aligned=False
+      DKIM : result=pass, signing domain=example.org, From=example.org -> aligned=True
+    ACTUAL: SPF=pass  DKIM=pass  DMARC=pass  -> deliver
+
+==============================================================================
+Outcome table
+==============================================================================
+message                                                       SPF       DKIM      DMARC   action
+M1 legitimate (alice via own server, DKIM-signed)             pass      pass      pass    deliver
+M2 spoofed: From ceo@example.org from unauthorised IP, unsig  fail      none      fail    REJECT
+M3 mailing list modified subject+footer after DKIM signing    pass      fail      fail    REJECT
+M4 passes SPF for attacker.test but visible From is example.  pass      none      fail    REJECT
+M5 attacker signs DKIM as attacker.test, From example.org     fail      pass      fail    REJECT
+M6 unmodified forward through relay (IP/envelope changed)     pass      pass      pass    deliver
+
+What each mechanism authenticates (observed):
+  SPF   - the ENVELOPE sender domain (MAIL FROM / HELO) vs the CONNECTING IP. It says nothing about the visible From (M4).
+          DNS: TXT at the domain listing authorised IPs/includes.
+  DKIM  - the SIGNING domain d= and that signed headers + body hash are unchanged. Not tied to the visible From (M5).
+          DNS: TXT at selector._domainkey.domain with the public key. Signed: listed headers (h=) + canonical body hash.
+  DMARC - ties the above to the visible From domain via ALIGNMENT and publishes the policy (none/quarantine/reject).
+          DNS: TXT at _dmarc.<from-domain>.
+Questions:
+  * Can a message pass SPF or DKIM and still fail DMARC?  YES - M4 (SPF pass, unaligned) and M5 (DKIM pass, unaligned): an attacker
+    can authenticate their OWN domain perfectly; only alignment with the visible From makes the check meaningful.
+  * Can a legitimate message fail?  YES - M3: a mailing list changed the subject/body, breaking DKIM, and relays from its own IP so SPF
+    is unaligned; with p=reject the genuine message is rejected. M6 shows the opposite: a relay that is not in the From domain's SPF leaves SPF unaligned but unmodified DKIM
+    survives and DMARC still passes. Hence DKIM is the more forwarding-robust of the two.
+
+Deployment analysis:
+  A. Small company, one mail server: SPF listing one IP + DKIM on that server + DMARC p=quarantine -> reject is easy; few moving parts, so
+     strict alignment is realistic. Forwarding by recipients is the main source of false positives (SPF breaks, DKIM saves).
+  B. Large organisation with third-party senders (CRM, newsletter, ticketing): SPF record grows (10-lookup limit), every sender must
+     either be in SPF with an aligned envelope domain or sign DKIM as d=<your domain> (delegated selectors). Start with p=none and
+     read DMARC reports to find unknown senders before enforcing; use subdomains per vendor.
+  C. Mailing list / forwarder that modifies messages: DKIM breaks on modification and SPF is evaluated against the list's IP, so DMARC
+     can fail for legitimate mail (M3). Mitigations: list rewrites From to its own domain, ARC chains to preserve original results,
+     or the sender domain uses p=none/quarantine. Plain forwarding without modification keeps DKIM valid (M6).
+  None of the three replaces PGP/S/MIME: they authenticate DOMAINS/servers, in transit between MTAs, and protect nothing about the content from
+  the mail servers themselves (no confidentiality, no per-user signature, no end-to-end non-repudiation); a compromised legitimate server
+  or an authorised sender passes all three. PGP/S/MIME authenticate the individual and encrypt the content end to end.

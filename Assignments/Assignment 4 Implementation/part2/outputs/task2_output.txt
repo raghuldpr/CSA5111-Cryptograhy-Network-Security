@@ -1,0 +1,131 @@
+[pki] work dir C:\Users\raghu\AppData\Local\Temp\smime_phx2e0sq
+[pki] chain: Test Root CA -> Test Intermediate CA -> {Alice, Bob, Expired Eve, Revoked Rita}; plus Rogue Root CA -> Mallory (claims alice@company.example)
+[pki] revoked serial in intermediate CRL: 7f24ba2b9027022638bbb34e0c58982a692fca14
+
+==============================================================================
+2.1 Normal case
+==============================================================================
+SOLUTION A - S/MIME (sign-then-encrypt, Alice -> Bob)
+  step 1 DECRYPT          PASS (content-encryption key unwrapped with Bob's private key)
+  step 2 SIGNATURE         PASS (SHA-256 digest of content matches signed attributes; RSA signature valid)
+  step 3a SIGNER CERT        Alice <alice@company.example> serial 2c2e749d55359d060edcfa88c454aad0bc6f3e4c
+  step 3b CHAIN BUILD         leaf -> Test Intermediate CA -> Test Root CA (trusted anchor, -CAfile)
+  step 3c VALIDITY PERIOD     2026-11-20 .. 2027-11-20 contains now
+  step 3d KEY USAGE / EKU     emailProtection + digitalSignature (-purpose smimesign)
+  step 3e REVOCATION          CRLs for intermediate and root consulted (-crl_check_all): not revoked
+  step 3f EMAIL IDENTITY      matches expected alice@company.example
+  RESULT: ACCEPTED; plaintext recovered == original: True
+  sizes: message 68 B, signed CMS 2519 B (includes Alice cert + intermediate cert), encrypted CMS 2973 B
+  certificate overhead inside message: 1776 B (Alice leaf + intermediate)
+
+SOLUTION B - PGP-style (Task 1 tool, web-of-trust ring)
+  [recv] parsed: 1 recipient slot(s), nonce 12 B, ciphertext 365 B
+  [recv] check 1 PASS: slot found for bob (keyid e9f0a4bfc4671a3a)
+  [recv] check 2 PASS: session key unwrapped with bob's private key (RSA-OAEP)
+  [recv] check 3 PASS: AES-GCM tag verified (nothing decompressed before this point)
+  [recv] check 4 PASS: decompressed 349 B -> 338 B, parsed (signer keyid f26de35e8aadd476)
+  [recv] key-ring validity of signer alice:
+  [recv]    certification by carol: signature ok, owner_trust=full
+  [recv]    => alice: full=1 marginal=0 -> VALID
+  [recv] check 5 PASS: RSA-PSS signature valid, signer identity = alice | pk_ops=2 sym_ops=1 hash_ops=1
+  RESULT: ACCEPTED signer=alice; plaintext ok: True
+  sizes: PGP envelope 654 B (signer key NOT included; receiver already holds it in the ring)
+  key overhead if sender attached key + 1 certification: 550 B
+
+==============================================================================
+2.2 Break the trust assumptions (S/MIME: 6 failure cases; PGP: 1)
+==============================================================================
+
+--- F1 Expired certificate (Expired Eve, valid until 35 days ago)
+    PREDICTION: REJECT at step 'validity period' (openssl: certificate has expired)
+    step 1 DECRYPT          PASS (content-encryption key unwrapped with Bob's private key)
+    step 2 SIGNATURE         PASS (SHA-256 digest of content matches signed attributes; RSA signature valid)
+    step 3 CERT VALIDATION   FAIL -> openssl: O=SIMATS Test PKI, CN=Expired Eve | error 10 at 0 depth lookup: certificate has expired | error signer_out.pem: verification failed
+    ACTUAL: REJECTED
+
+--- F2 Certificate issued by an untrusted CA (Rogue Root -> Mallory)
+    PREDICTION: REJECT at chain building (self-signed root not in trust store)
+    step 1 DECRYPT          PASS (content-encryption key unwrapped with Bob's private key)
+    step 2 SIGNATURE         PASS (SHA-256 digest of content matches signed attributes; RSA signature valid)
+    step 3 CERT VALIDATION   FAIL -> openssl: error 20 at 0 depth lookup: unable to get local issuer certificate | error signer_out.pem: verification failed
+    ACTUAL: REJECTED
+
+--- F3 Sender e-mail does not match certificate (Bob's valid cert, receiver expects alice@company.example)
+    PREDICTION: REJECT at identity step: chain is fine but certificate email != claimed sender
+    step 1 DECRYPT          PASS (content-encryption key unwrapped with Bob's private key)
+    step 2 SIGNATURE         PASS (SHA-256 digest of content matches signed attributes; RSA signature valid)
+    step 3 CERT VALIDATION   FAIL -> openssl: error 63 at 0 depth lookup: email address mismatch | error signer_out.pem: verification failed
+    ACTUAL: REJECTED
+
+--- F4 Revoked certificate (Revoked Rita, serial in intermediate CRL)
+    PREDICTION: REJECT at revocation step (CRL check)
+    step 1 DECRYPT          PASS (content-encryption key unwrapped with Bob's private key)
+    step 2 SIGNATURE         PASS (SHA-256 digest of content matches signed attributes; RSA signature valid)
+    step 3 CERT VALIDATION   FAIL -> openssl: O=SIMATS Test PKI, CN=Revoked Rita | error 23 at 0 depth lookup: certificate revoked | error signer_out.pem: verification failed
+    ACTUAL: REJECTED
+
+--- F5 Tampered message body (14.2M -> 41.2M inside the signed content)
+    PREDICTION: REJECT at final signature step (digest mismatch); chain/identity steps would pass
+    step 2 SIGNATURE         FAIL -> openssl: E4490000:error:1700006D:CMS routines:CMS_verify:content verify error:../openssl-3.5.5/crypto/cms/cms_smime.c:462:
+    ACTUAL: REJECTED
+
+--- F6 Intermediate certificate missing from the message and from the verifier's store
+    PREDICTION: REJECT at chain building (unable to get local issuer certificate)
+    step 1 DECRYPT          PASS (content-encryption key unwrapped with Bob's private key)
+    step 2 SIGNATURE         PASS (SHA-256 digest of content matches signed attributes; RSA signature valid)
+    step 3 CERT VALIDATION   FAIL -> openssl: error 20 at 0 depth lookup: unable to get local issuer certificate | error signer_out.pem: verification failed
+    ACTUAL: REJECTED
+
+PGP failure: key not validated (insufficient signatures)
+    PREDICTION: mallory's key has 0 certifications -> UNKNOWN -> tool warns and refuses
+    [recv] parsed: 1 recipient slot(s), nonce 12 B, ciphertext 365 B
+    [recv] check 1 PASS: slot found for bob (keyid e9f0a4bfc4671a3a)
+    [recv] check 2 PASS: session key unwrapped with bob's private key (RSA-OAEP)
+    [recv] check 3 PASS: AES-GCM tag verified (nothing decompressed before this point)
+    [recv] check 4 PASS: decompressed 349 B -> 338 B, parsed (signer keyid 87274870e51a8966)
+    [recv] key-ring validity of signer mallory:
+    [recv]    => mallory: full=0 marginal=0 -> UNKNOWN
+    ACTUAL: REJECTED -> [trust] signer key 'mallory' is UNKNOWN: insufficient certifications (WARNING: key not validated)
+    Now dave (only MARGINAL trust) certifies mallory: 1 marginal < 2 needed:
+    [recv] parsed: 1 recipient slot(s), nonce 12 B, ciphertext 365 B
+    [recv] check 1 PASS: slot found for bob (keyid e9f0a4bfc4671a3a)
+    [recv] check 2 PASS: session key unwrapped with bob's private key (RSA-OAEP)
+    [recv] check 3 PASS: AES-GCM tag verified (nothing decompressed before this point)
+    [recv] check 4 PASS: decompressed 349 B -> 338 B, parsed (signer keyid 87274870e51a8966)
+    [recv] key-ring validity of signer mallory:
+    [recv]    certification by dave: signature ok, owner_trust=marginal
+    [recv]    => mallory: full=0 marginal=1 -> INVALID
+    ACTUAL: REJECTED -> [trust] signer key 'mallory' is INVALID: insufficient certifications (WARNING: key not validated)
+
+==============================================================================
+2.3 Engineering comparison (operation counts, sizes, steps, trust)
+==============================================================================
+metric                                                      S/MIME (A)             PGP-style (B)
+public-key ops, sender                                               2                         2
+public-key ops, receiver (1st msg from sender)                         4           3 (1 cert path)
+public-key ops, receiver (later messages)          2 (if chain cached)       2 (validity cached)
+signed+encrypted message size (bytes)                             2973                       654
+  of which certificate/key material                               1776   0 (key already in ring)
+message size if sender attaches identity                          2973                      1204
+PGP receiver counters as measured: pk_ops=2 sym_ops=1 hash_ops=1  (+1 certification-signature verify done inside KeyRing.validity, not counted by the counter => 3 total, matching the table)
+
+Steps to verify a NEW sender the receiver has never met:
+  S/MIME: (1) take cert + intermediate from the message  (2) build chain to a root already in the trust store
+          (3) check validity, key usage, email identity, CRL/OCSP.  No human action if the CA is already trusted.
+  PGP   : (1) obtain sender's public key (keyserver / attached)  (2) look for certifications from keys already in the
+          ring  (3) compute full/marginal counts  (4) if < threshold: human must verify the fingerprint out-of-band
+          and sign the key (or accept a warning).  Observed: mallory with 0/1-marginal certifications was refused.
+What must the receiver trust:
+  S/MIME: the configured root CA, and (transitively) every CA below it that the root authorised - hierarchical, centralised.
+  PGP   : each introducer individually (owner trust per person) - decentralised, subjective, per-receiver policy.
+
+==============================================================================
+2.4 Changed requirement: 5,000 employees + customers across several organisations
+==============================================================================
+Observation 2.1-2.3 shows S/MIME's receiver needs only one pre-installed root to verify a never-met sender
+(F2 and F6 show the chain to a trusted root is the unit of trust: a rogue root or missing intermediate fails at chain building), whereas PGP verified alice only because carol, an introducer already in bob's ring, had signed
+her key; mallory (no path) was refused with a warning. With 5,000 people across organisations, a receiver would
+need a trusted-introducer path to each unknown sender: the web grows O(n^2) in the worst case and every receiver
+holds different, personally curated trust. Conclusion: choose S/MIME with a CA hierarchy (per organisation
+intermediates, cross-trusted roots or a shared public CA) - verification of strangers needs no manual step, revocation
+is centrally published (F4 proved the CRL check blocks Rita), at the cost of trusting the CA and operating a PKI.

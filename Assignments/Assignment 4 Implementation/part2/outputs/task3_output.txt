@@ -1,0 +1,84 @@
+
+==============================================================================
+Stage A - normal tunnel-mode protection (W=8 for readable bitmaps)
+==============================================================================
+SA: SPI=0x1001 AES-256-GCM, 4-byte salt + 8-byte IV nonce, ICV=16 B, window W=8, peer=gw-lab
+ #    SPI/SA  seq   ICV state after                      decapsulated inner packet
+ 1    0x1001    1    OK highest=  1 bitmap=00000001      10.1.0.5->10.2.0.9 proto=17 data='patient-lab-result #001'
+ 2    0x1001    2    OK highest=  2 bitmap=00000011      10.1.0.5->10.2.0.9 proto=17 data='patient-lab-result #002'
+ 3    0x1001    3    OK highest=  3 bitmap=00000111      10.1.0.5->10.2.0.9 proto=17 data='patient-lab-result #003'
+ 4    0x1001    4    OK highest=  4 bitmap=00001111      10.1.0.5->10.2.0.9 proto=17 data='patient-lab-result #004'
+ 5    0x1001    5    OK highest=  5 bitmap=00011111      10.1.0.5->10.2.0.9 proto=17 data='patient-lab-result #005'
+outer header on wire: 203.0.113.1 -> 198.51.100.1 proto=50 (ESP); inner addresses 10.x are hidden. packet size 100 B for a 43 B inner packet (overhead 57 B)
+
+==============================================================================
+Stage B - replay and reordering (W=32)
+==============================================================================
+Setup: packets 1..64 sent; [20, 31, 32, 33, 48] delayed in the network. After the rest arrive: highest= 64 bitmap=01111111111111101111111111111111
+Window covers sequence numbers 33..64 (offset 0..31). Edge: seq 33 = offset 31 (last slot), seq 32 = offset 32 (just outside).
+
+test                                            PREDICTION                                          ACTUAL    state                                           internal reason
+(i)   exact replay of seq 64                    DROP  (duplicate bit set)                           DROP      highest= 64 bitmap=01111111111111101111111111111111REPLAY_CHECK seq=64: DUPLICATE
+(ii)  seq 48 delayed by 16 = W/2 positions      ACCEPT (inside window, bit clear)                   ACCEPT    highest= 64 bitmap=01111111111111111111111111111111ok
+(iii) seq 20 delayed by 44 > W positions        DROP  (too old: offset 44 >= 32)                    DROP      highest= 64 bitmap=01111111111111111111111111111111REPLAY_CHECK seq=20: TOO_OLD
+(iv)  replay of seq 63 with seq field -> 200    DROP  (seq is in AAD: ICV fails, window untouched)  DROP      highest= 64 bitmap=01111111111111111111111111111111ICV_FAIL seq=200 (window NOT updated)
+(iv') replay of seq 63 with seq field -> 70     DROP  (ICV fails even though 70 would be a 'new high')DROP      highest= 64 bitmap=01111111111111111111111111111111ICV_FAIL seq=70 (window NOT updated)
+(v)   BOUNDARY seq 33 (offset W-1 = 31)         ACCEPT (last slot of window, unseen)                ACCEPT    highest= 64 bitmap=11111111111111111111111111111111ok
+(vi)  BOUNDARY seq 32 (offset W = 32)           DROP  (first sequence outside window)               DROP      highest= 64 bitmap=11111111111111111111111111111111REPLAY_CHECK seq=32: TOO_OLD
+(vii) seq 31 delayed, now offset 33             DROP  (too old)                                     DROP      highest= 64 bitmap=11111111111111111111111111111111REPLAY_CHECK seq=31: TOO_OLD
+(viii) seq 33 again (edge replay)               DROP  (duplicate)                                   DROP      highest= 64 bitmap=11111111111111111111111111111111REPLAY_CHECK seq=33: DUPLICATE
+
+For (iv)/(iv') note highest stayed 64: an unauthenticated packet cannot move the window (integrity before state update).
+
+==============================================================================
+Stage C - tamper and misconfiguration
+==============================================================================
+  external view  (i)   modified payload byte   : dropped silently -> returns None (no ICMP, no error text, same code path/response)
+  external view  (ii)  unknown SPI 0xDEAD      : dropped silently -> returns None (no ICMP, no error text, same code path/response)
+  external view  (iii-a) truncated packet      : dropped silently -> returns None (no ICMP, no error text, same code path/response)
+  (iii-b) SA max_seq=3: three packets sent; sender now tries packet 4 ...
+    sender refuses to wrap the counter: SPI 0x3003: sequence space exhausted -> must rekey (new SA)
+    REKEY event: new SA SPI=0x3004 installed (keys would come from a fresh IKE CREATE_CHILD_SA); old SA retired
+    packet on new SA accepted: True
+    late packet on retired SPI 0x3003 accepted: False
+
+  INTERNAL log (administrator only, specific reasons):
+    - ICV_FAIL seq=1 (window NOT updated)
+    - UNKNOWN_SPI: 0xdead
+    - MALFORMED: packet too short
+    - UNKNOWN_SPI: 0x3003
+
+How information leakage is avoided: esp_process() has one failure exit (`drop`) that returns the identical value None
+to the network layer. Nothing is sent back to the sender, so an attacker cannot learn whether the SPI, the
+sequence number or the ICV was wrong; the reason is written only to the internal log. The ICV check uses AES-GCM
+tag verification (constant-time compare inside the library). Remaining side channel: a cheap pre-check (unknown SPI /
+replay) returns earlier than a full ICV verification; a production gateway would rate-limit and not expose timing to the sender.
+
+==============================================================================
+Stage D - protection coverage table and NAT experiment
+==============================================================================
+packet part                       ESP-transport       ESP-tunnel            AH                                                
+Original IP header                neither             ENCRYPT+AUTH (inner)  AUTH (immutable fields; TTL/checksum zeroed)      
+New outer IP header               n/a                 neither               n/a                                               
+ESP header (SPI, seq)             AUTH                AUTH                  n/a                                               
+AH header (SPI, seq, ICV)         n/a                 n/a                   AUTH                                              
+TCP/UDP header + data             ENCRYPT+AUTH        ENCRYPT+AUTH          AUTH only (readable)                              
+ESP trailer (pad, next hdr)       ENCRYPT+AUTH        ENCRYPT+AUTH          n/a                                               
+
+Answers to the security team:
+ 1. Unprotected in transport mode: the ORIGINAL IP header (addresses, protocol, TTL, size) travels
+    in clear and is not authenticated by ESP. In tunnel mode the original header is inside the encrypted+authenticated payload;
+    only the NEW outer header (gateway addresses, protocol 50, size, TTL) is exposed and unauthenticated.
+
+ 2. NAT experiment (outer source address rewritten 203.0.113.1 -> 192.0.2.77 in flight):
+      ESP tunnel packet accepted after NAT : True   (ICV covers SPI|SEQ|encrypted payload, not the outer header)
+      AH packet accepted after NAT         : False  (ICV covers the immutable IP header fields incl. source address)
+    => AH integrity coverage includes the outer IP header, so any address-translating middlebox breaks it; ESP keeps
+       working (NAT-T additionally wraps ESP in UDP/4500 so NAT can track the flow).
+ 3. Keys: SPIs, algorithms and keys are NOT configured by hand. IKEv2 (UDP 500/4500) first runs IKE_SA_INIT (Diffie-Hellman
+    -> shared secret with forward secrecy, nonces) and IKE_AUTH (peers authenticate with certificates/PSK; the exchange
+    is encrypted+integrity-protected with IKE_SA keys), which creates the first CHILD_SA (the ESP SA: SPI, algorithms,
+    traffic selectors, keys derived via a PRF from SKEYSEED). IKE protects the negotiation against eavesdropping,
+    tampering, peer impersonation and downgrade. Refresh: rekey by CREATE_CHILD_SA before lifetime (time/bytes) or
+    before the 32-bit sequence space ends (Stage C-iii); install the new SA, then delete the old one; optional fresh DH
+    for PFS. Compromise of a child SA key exposes only that SA's traffic.

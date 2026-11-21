@@ -1,0 +1,29 @@
+=== Q3: IPsec ESP anti-replay desk-check (W=4) ===
+No   Seq  ICV      Highest  Bitmap  Decision
+1    1    Valid    1        0001    ACCEPT - New high sequence number
+2    2    Valid    2        0011    ACCEPT - New high sequence number
+3    5    Valid    5        1001    ACCEPT - New high sequence number
+4    3    Valid    5        1101    ACCEPT - Valid out-of-order packet
+5    2    Valid    5        1101    DROP - Duplicate/replayed packet
+6    9    Valid    9        0001    ACCEPT - New high sequence number
+7    4    Valid    9        0001    DROP - Sequence number too old
+8    7    Invalid  9        0001    DROP - Integrity check failed (state unchanged)
+9    7    Valid    9        0101    ACCEPT - Valid out-of-order packet
+
+=== Q4: S/MIME corrected validation ===
+Mallory self-signed cert : REJECT: Certificate chain is not trusted
+Alice trusted cert       : ACCEPT
+
+=== Q5.1: PGP web-of-trust (Alice's key, Bob's policy) ===
+All four signatures      : VALID
+Only Carol (full)        : VALID
+Only Dave (marginal)     : INVALID
+Dave + Frank             : INVALID
+Unknown signer only      : UNKNOWN
+
+=== Q5: Spam/phishing scoring (threshold >= 4) ===
+Phishing mail          score=10 -> LIKELY SPAM/PHISHING
+Legitimate mail        score=-2 -> DELIVER/REVIEW
+SPF fail + reply-to    score= 3 -> DELIVER/REVIEW
+DKIM fail + bad URL    score= 4 -> LIKELY SPAM/PHISHING
+

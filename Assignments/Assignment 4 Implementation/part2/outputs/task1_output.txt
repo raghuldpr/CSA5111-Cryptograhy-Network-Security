@@ -1,0 +1,86 @@
+
+==============================================================================
+1.1 / 1.2  Normal case: alice -> bob (instrumented)
+==============================================================================
+[send] plaintext length          : 300 bytes
+[send] SHA-256 digest            : 48114926ed701515...  signed with alice's private key (RSA-PSS), sig=256 B
+[send] signed package            : 570 B -> compressed 345 B (ratio 0.61)
+[send] session-key identifier    : 56bcd5728c28 (fingerprint only, key not shown)
+[send] session key wrapped for   : bob (keyid 83c507af6ac60bd2) RSA-OAEP -> 256 B
+[send] AES-256-GCM               : 345 B -> 361 B (incl. 16 B tag); header bound as AAD
+[send] envelope 650 B -> base64 armour 868 chars | pk_ops=2 sym_ops=1 hash_ops=1
+
+-- labelled view of the protected message --
+      0-    4 (   4 B) magic 'PGPX'                               50 47 50 58
+      4-    5 (   1 B) version                                    01
+      5-    7 (   2 B) recipient count                            00 01
+      7-   15 (   8 B) recip[0] keyid                             83 c5 07 af 6a c6 0b d2
+     15-   17 (   2 B) recip[0] wrapped length                    01 00
+     17-  273 ( 256 B) recip[0] RSA-OAEP wrapped session key      4d e0 6b a3 73 7a ba b0 90 06 5a 30 fa a3 36 d1 ...
+    273-  285 (  12 B) GCM nonce                                  ad 9c 78 f3 4f 48 91 b9 6d b8 5d d5
+    285-  289 (   4 B) ciphertext length                          00 00 01 69
+    289-  634 ( 345 B) ciphertext (compressed signed package)     60 98 55 00 ee f9 a5 97 65 7d 87 e2 59 ce 28 30 ...
+    634-  650 (  16 B) GCM tag                                    10 7c 50 d8 f2 f1 64 34 d7 33 fc 1c 7d 0e 38 da
+  base64 (first 96 chars): UEdQWAEAAYPFB69qxgvSAQBN4Gujc3q6sJAGWjD6ozbRNS8HGNC6uNQxBwl2HeGMBQ+GRHkupbFM917GB0IeNsIGWVWYxP5/...
+
+[recv] parsed: 1 recipient slot(s), nonce 12 B, ciphertext 361 B
+[recv] check 1 PASS: slot found for bob (keyid 83c507af6ac60bd2)
+[recv] check 2 PASS: session key unwrapped with bob's private key (RSA-OAEP)
+[recv] check 3 PASS: AES-GCM tag verified (nothing decompressed before this point)
+[recv] check 4 PASS: decompressed 345 B -> 570 B, parsed (signer keyid 45c8aab9ebbc2780)
+[recv] key-ring validity of signer alice:
+[recv]    => alice: full=0 marginal=0 -> UNKNOWN
+[recv] check 5 PASS: RSA-PSS signature valid, signer identity = alice | pk_ops=2 sym_ops=1 hash_ops=1
+[result] decrypted == original: True | signer identity: alice
+
+==============================================================================
+1.3  Requirement change: (a) 1 recipient, (b) 5 recipients, (c) 10x message
+==============================================================================
+PREDICTION (written before running):
+  size : (b) = (a) + 4 extra slots x (8+2+256) = +1064 B; (c) payload 10x larger but text is repetitive so compresses well
+  pk ops: (a)=1 sign+1 wrap=2; (b)=1+5=6; (c)=2.   sym ops: 1 in every case
+  sender work grows more with recipient count in public-key ops (expensive, 256 B each);
+  with message size only the cheap symmetric/hash work grows.
+
+case                plain B  envelope B  pk ops  sym ops      ms
+(a) 1 recipient         300         649       2        1     2.1
+(b) 5 recipients        300        1715       6        1     2.6
+(c) msg x10            3000         674       2        1     3.2
+
+ACTUAL vs PREDICTED: (b)-(a) = 1066 B (predicted 1064: matches). (c) is only 25 B larger for 2700 B more plaintext (compression).
+Interpretation: sender work scales with recipients in the expensive public-key dimension; message size
+only affects the cheap symmetric dimension. Hybrid encryption means pk ops == 1 + recipients regardless of size.
+
+==============================================================================
+1.4  Boundary / tamper tests (each must FAIL CLOSED with a specific error)
+==============================================================================
+
+--- empty message (boundary)
+    why chosen: zero-length plaintext exercises length fields, zlib and signing an empty digest; must be ACCEPTED, not crash
+    RESULT: ACCEPTED signer=alice len=0
+
+--- one-bit flip in ciphertext
+    why chosen: AEAD integrity: must fail before decompression/parsing
+    RESULT: REJECTED -> [aead] authentication tag mismatch - ciphertext/header modified   (non-zero exit status 2)
+
+--- one-bit flip in header (carol's slot keyid; bob's own slot intact)
+    why chosen: header is bound as AAD; tests that wrap-slot tampering is not silently accepted
+    RESULT: REJECTED -> [aead] authentication tag mismatch - ciphertext/header modified   (non-zero exit status 2)
+
+--- recipient not in list (erin)
+    why chosen: a non-recipient must not find a slot
+    RESULT: REJECTED -> [recipient] erin: no session-key slot for key a97de26fd97c9afa (not a recipient)   (non-zero exit status 2)
+
+--- signature from a different key (mallory, uncertified in ring)
+    why chosen: encryption is valid, but signer key has no certifications: tool must warn/refuse (trust failure)
+    RESULT: REJECTED -> [trust] signer key 'mallory' is UNKNOWN: insufficient certifications (WARNING: key not validated)   (non-zero exit status 2)
+
+--- truncated envelope
+    why chosen: parser bounds checking
+    RESULT: REJECTED -> [parse] truncated envelope   (non-zero exit status 2)
+
+--- garbage input
+    why chosen: armour validation
+    RESULT: REJECTED -> [armour] not valid base64   (non-zero exit status 2)
+
+Note: decompression happens only AFTER the GCM tag verifies and is capped at 64 MiB, so an outsider cannot trigger a zip-bomb.
